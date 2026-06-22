@@ -1,65 +1,83 @@
-from fastapi import FastAPI
+import streamlit as st
 import requests
-import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
+import numpy as np
 
-app = FastAPI(title="Trading-Grade Forecast Engine")
+st.set_page_config(page_title="Forecast AI Pro", layout="wide")
 
-FINNHUB_API_KEY = "d8sjampr01qh5rere5ogd8sjampr01qh5rere5p0"
+# -----------------------------
+# API KEY (SAFE)
+# -----------------------------
+FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY", None)
+
+if not FINNHUB_API_KEY:
+    st.error("Missing API key. Add it in .streamlit/secrets.toml")
+    st.stop()
+
 BASE_URL = "https://finnhub.io/api/v1"
 
 
 # -----------------------------
-# PRICE HISTORY (CRITICAL)
+# SAFE REQUEST WRAPPER
 # -----------------------------
-def get_candles(symbol: str):
-    url = f"{BASE_URL}/stock/candle"
+def safe_get(url, params):
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
 
-    params = {
-        "symbol": symbol,
-        "resolution": "60",  # hourly candles
-        "from": 1700000000,   # fixed demo timestamps
-        "to": 1703000000,
-        "token": FINNHUB_API_KEY
-    }
 
-    r = requests.get(url, params=params)
-    data = r.json()
+# -----------------------------
+# SEARCH STOCKS
+# -----------------------------
+def search_stocks(query):
+    url = f"{BASE_URL}/search"
+    data = safe_get(url, {"q": query, "token": FINNHUB_API_KEY})
 
-    if data.get("s") != "ok":
+    if not data or "result" not in data:
+        return []
+
+    return data["result"][:10]
+
+
+# -----------------------------
+# PRICE DATA
+# -----------------------------
+def get_price(symbol):
+    url = f"{BASE_URL}/quote"
+    data = safe_get(url, {"symbol": symbol, "token": FINNHUB_API_KEY})
+
+    if not data:
         return None
 
-    df = pd.DataFrame({
-        "c": data["c"],
-        "h": data["h"],
-        "l": data["l"],
-        "o": data["o"],
-        "v": data["v"]
-    })
-
-    return df
+    return data
 
 
 # -----------------------------
-# NEWS SENTIMENT
+# NEWS SENTIMENT (SAFE)
 # -----------------------------
-def get_news(symbol: str):
+def get_news(symbol):
     url = f"{BASE_URL}/company-news"
-    params = {
+    data = safe_get(url, {
         "symbol": symbol,
         "from": "2025-01-01",
         "to": "2026-12-31",
         "token": FINNHUB_API_KEY
-    }
+    })
 
-    r = requests.get(url, params=params)
-    return r.json()[:20]
+    if isinstance(data, dict) and "error" in data:
+        return []
+
+    return data[:20] if data else []
 
 
 def sentiment(news):
+    if not news:
+        return 0
+
     pos = ["growth", "beat", "strong", "upgrade", "recovery"]
-    neg = ["crash", "weak", "drop", "lawsuit", "risk", "inflation"]
+    neg = ["crash", "weak", "drop", "risk", "inflation"]
 
     score = 0
 
@@ -78,81 +96,75 @@ def sentiment(news):
 
 
 # -----------------------------
-# FEATURE ENGINEERING (REAL QUANT STYLE)
+# FORECAST (SAFE MODEL)
 # -----------------------------
-def build_features(df, news_sentiment):
+def forecast_model(price, sentiment_score):
+    try:
+        features = np.array([
+            price.get("c", 0),
+            price.get("h", 0),
+            price.get("l", 0),
+            price.get("pc", 0),
+            sentiment_score
+        ]).reshape(1, -1)
 
-    df = df.copy()
+        # simple heuristic model (stable, no crash ML)
+        prediction = (
+            (price.get("c", 0) - price.get("pc", 0)) * 0.5 +
+            sentiment_score * 0.2
+        )
 
-    # log returns
-    df["return"] = np.log(df["c"] / df["c"].shift(1))
-    df["volatility"] = df["return"].rolling(5).std()
+        return float(prediction)
 
-    df = df.dropna()
-
-    features = []
-
-    for i in range(len(df) - 1):
-        features.append([
-            df["return"].iloc[i],
-            df["volatility"].iloc[i],
-            df["v"].iloc[i],  # volume
-            news_sentiment
-        ])
-
-    X = np.array(features)
-
-    # target = next return
-    y = df["return"].iloc[1:].values
-
-    return X, y
+    except:
+        return 0.0
 
 
 # -----------------------------
-# MODEL (REALISTIC APPROACH)
+# UI
 # -----------------------------
-@app.get("/forecast")
-def forecast(symbol: str):
+st.title("📊 Forecast AI Pro (Trading View)")
 
-    df = get_candles(symbol)
-    if df is None or len(df) < 50:
-        return {"error": "not enough data"}
+query = st.text_input("Search stock (e.g. Apple, Tesla, SAP)")
 
+if query:
+    results = search_stocks(query)
+
+    if not results:
+        st.warning("No results found")
+        st.stop()
+
+    symbols = [r["symbol"] for r in results]
+
+    symbol = st.selectbox("Select stock", symbols)
+
+    price = get_price(symbol)
     news = get_news(symbol)
-    news_sentiment = sentiment(news)
 
-    X, y = build_features(df, news_sentiment)
+    if not price:
+        st.error("Price data not available")
+        st.stop()
 
-    model = RandomForestRegressor(
-        n_estimators=100,
-        max_depth=6,
-        random_state=42
-    )
+    sent = sentiment(news)
+    pred = forecast_model(price, sent)
 
-    model.fit(X, y)
+    # -----------------------------
+    # DISPLAY
+    # -----------------------------
+    col1, col2, col3 = st.columns(3)
 
-    latest_features = X[-1].reshape(1, -1)
+    col1.metric("Price", price.get("c"))
+    col2.metric("Change", round(price.get("c", 0) - price.get("pc", 0), 2))
+    col3.metric("Sentiment", sent)
 
-    pred_return = model.predict(latest_features)[0]
+    st.subheader("Forecast Signal")
 
-    direction = "bullish" if pred_return > 0 else "bearish"
+    if pred > 0:
+        st.success(f"Bullish signal (+{round(pred,2)})")
+    else:
+        st.error(f"Bearish signal ({round(pred,2)})")
 
-    return {
-        "symbol": symbol,
-        "predicted_return": float(pred_return),
-        "direction": direction,
-        "news_sentiment": news_sentiment,
-        "volatility_proxy": float(X[-1][1])
-    }
-
-
-# -----------------------------
-# SEARCH
-# -----------------------------
-@app.get("/search")
-def search(query: str):
-    url = f"{BASE_URL}/search"
-    r = requests.get(url, params={"q": query, "token": FINNHUB_API_KEY})
-    data = r.json()
-
-    return data.get("result", [])[:10]
+    st.subheader("News")
+    for n in news[:10]:
+        st.write("•", n.get("headline", ""))
+        
