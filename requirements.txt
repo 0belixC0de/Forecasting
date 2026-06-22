@@ -1,6 +1,5 @@
-fastapi
-uvicorn
+streamlit
 requests
-numpy
 pandas
-scikit-learn
+numpy
+plotly
