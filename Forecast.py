@@ -2,23 +2,24 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
+import time
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="TradeAI", layout="wide")
+# -----------------------------
+# CONFIG
+# -----------------------------
+st.set_page_config(page_title="TradeAI Pro", layout="wide")
 
-# -----------------------------
-# API KEY
-# -----------------------------
-FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY")
+FINNHUB_API_KEY = st.secrets.get("FINNHUB_API_KEY", None)
 BASE_URL = "https://finnhub.io/api/v1"
 
 if not FINNHUB_API_KEY:
-    st.error("Missing API key")
+    st.error("Missing API key (FINNHUB_API_KEY in Streamlit secrets)")
     st.stop()
 
 
 # -----------------------------
-# API HELPERS
+# SAFE API CALL
 # -----------------------------
 def get_json(url, params):
     try:
@@ -31,29 +32,45 @@ def get_json(url, params):
 # -----------------------------
 # SEARCH
 # -----------------------------
-def search(q):
-    data = get_json(f"{BASE_URL}/search", {"q": q, "token": FINNHUB_API_KEY})
-    if not data:
+def search_symbols(q):
+    data = get_json(f"{BASE_URL}/search", {
+        "q": q,
+        "token": FINNHUB_API_KEY
+    })
+
+    if not data or "result" not in data:
         return []
-    return data.get("result", [])[:8]
+
+    return data["result"][:10]
 
 
 # -----------------------------
-# PRICE + CANDLES
+# LIVE QUOTE
 # -----------------------------
 def get_quote(symbol):
-    return get_json(f"{BASE_URL}/quote", {
+    data = get_json(f"{BASE_URL}/quote", {
         "symbol": symbol,
         "token": FINNHUB_API_KEY
     })
 
+    if not data or "c" not in data:
+        return None
 
+    return data
+
+
+# -----------------------------
+# CANDLES (FIXED + RELIABLE)
+# -----------------------------
 def get_candles(symbol):
+    to_ts = int(time.time())
+    from_ts = to_ts - 60 * 60 * 24 * 120  # last 120 days
+
     data = get_json(f"{BASE_URL}/stock/candle", {
         "symbol": symbol,
         "resolution": "D",
-        "from": 1600000000,
-        "to": 1700000000,
+        "from": from_ts,
+        "to": to_ts,
         "token": FINNHUB_API_KEY
     })
 
@@ -61,12 +78,15 @@ def get_candles(symbol):
         return None
 
     df = pd.DataFrame({
-        "open": data["o"],
-        "high": data["h"],
-        "low": data["l"],
-        "close": data["c"],
-        "volume": data["v"]
+        "open": data.get("o", []),
+        "high": data.get("h", []),
+        "low": data.get("l", []),
+        "close": data.get("c", []),
+        "volume": data.get("v", [])
     })
+
+    if df.empty:
+        return None
 
     return df
 
@@ -82,17 +102,17 @@ def get_news(symbol):
         "token": FINNHUB_API_KEY
     })
 
-    if not data:
+    if not data or isinstance(data, dict):
         return []
 
-    return data[:15]
+    return data[:12]
 
 
 def sentiment(news):
     if not news:
         return 0
 
-    pos = ["growth", "beat", "strong", "upgrade", "recovery", "profit"]
+    pos = ["growth", "beat", "strong", "upgrade", "profit", "recovery"]
     neg = ["drop", "crash", "weak", "risk", "inflation", "loss"]
 
     score = 0
@@ -112,37 +132,31 @@ def sentiment(news):
 
 
 # -----------------------------
-# FORECAST ENGINE (REAL MATH SIGNAL)
+# FORECAST MODEL (STABLE SIGNAL ENGINE)
 # -----------------------------
 def forecast(df, sent):
     close = df["close"]
 
-    log_return = np.log(close / close.shift(1)).fillna(0)
+    returns = np.log(close / close.shift(1)).fillna(0)
 
-    ma_short = close.rolling(5).mean()
-    ma_long = close.rolling(20).mean()
+    ma_short = close.rolling(5).mean().iloc[-1]
+    ma_long = close.rolling(20).mean().iloc[-1]
 
-    trend = (ma_short.iloc[-1] - ma_long.iloc[-1]) / ma_long.iloc[-1]
+    trend = (ma_short - ma_long) / ma_long if ma_long else 0
+    vol = returns.rolling(10).std().iloc[-1]
 
-    volatility = log_return.rolling(10).std().iloc[-1]
+    score = (trend * 2.0) + (sent * 0.7) - (vol * 1.2)
 
-    score = (
-        trend * 2.5 +
-        sent * 0.8 -
-        volatility * 1.5
-    )
-
-    return score, trend, volatility
+    return score, trend, vol
 
 
 # -----------------------------
 # CHART
 # -----------------------------
-def plot_chart(df):
+def chart(df):
     fig = go.Figure()
 
     fig.add_trace(go.Candlestick(
-        x=df.index,
         open=df["open"],
         high=df["high"],
         low=df["low"],
@@ -151,80 +165,97 @@ def plot_chart(df):
     ))
 
     fig.add_trace(go.Scatter(
-        x=df.index,
         y=df["close"].rolling(10).mean(),
-        name="MA 10"
+        name="MA10"
     ))
 
-    fig.layout.update(
+    fig.update_layout(
         height=500,
-        margin=dict(l=10, r=10, t=30, b=10),
-        template="plotly_dark"
+        template="plotly_dark",
+        margin=dict(l=10, r=10, t=30, b=10)
     )
 
     return fig
 
 
 # -----------------------------
-# UI (TRADE REPUBLIC STYLE)
+# UI (TRADING STYLE)
 # -----------------------------
-st.markdown("# 📈 TradeAI")
+st.title("📈 TradeAI Pro")
 
-query = st.text_input("Search stocks")
+query = st.text_input("Search stocks (Apple, Tesla, SAP...)")
 
 if not query:
-    st.info("Search a stock to start")
+    st.info("Enter a stock name to begin")
     st.stop()
 
-results = search(query)
+results = search_symbols(query)
 
 if not results:
-    st.warning("No results")
+    st.warning("No matches found")
     st.stop()
 
-symbols = [r["symbol"] for r in results if "symbol" in r]
+symbols = [r["symbol"] for r in results if r.get("symbol")]
+
 symbol = st.selectbox("Select asset", symbols)
 
 quote = get_quote(symbol)
 df = get_candles(symbol)
 news = get_news(symbol)
 
-if quote is None or df is None:
-    st.error("No market data available")
+# -----------------------------
+# SAFE CHECKS (IMPORTANT FIX)
+# -----------------------------
+if quote is None:
+    st.error("Price data not available")
     st.stop()
 
-sent = sentiment(news)
-score, trend, vol = forecast(df, sent)
+if df is None:
+    st.warning("No historical data — showing price only")
 
 # -----------------------------
-# HEADER (TR STYLE)
+# SENTIMENT + FORECAST
+# -----------------------------
+sent = sentiment(news)
+
+if df is not None:
+    score, trend, vol = forecast(df, sent)
+else:
+    score, trend, vol = sent, 0, 0
+
+# -----------------------------
+# HEADER METRICS
 # -----------------------------
 col1, col2, col3 = st.columns(3)
 
 col1.metric("Price", quote["c"])
-col2.metric("Daily Change", round(quote["c"] - quote["pc"], 2))
+col2.metric("Change", round(quote["c"] - quote["pc"], 2))
 col3.metric("Signal Score", round(score, 3))
 
-
 # -----------------------------
-# SIGNAL BLOCK
+# SIGNAL
 # -----------------------------
 if score > 0:
-    st.success("🟢 Bullish Bias")
+    st.success("🟢 Bullish bias")
 else:
-    st.error("🔴 Bearish Bias")
-
+    st.error("🔴 Bearish bias")
 
 # -----------------------------
 # CHART
 # -----------------------------
-st.plotly_chart(plot_chart(df), use_container_width=True)
-
+if df is not None:
+    st.plotly_chart(chart(df), use_container_width=True)
+else:
+    st.info("Chart not available for this asset")
 
 # -----------------------------
 # NEWS
 # -----------------------------
 st.subheader("News")
-for n in news[:10]:
-    st.write("•", n.get("headline"))
+
+if news:
+    for n in news:
+        st.write("•", n.get("headline"))
+else:
+    st.write("No news available")
     
