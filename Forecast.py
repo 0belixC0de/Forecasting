@@ -6,7 +6,7 @@ from sklearn.ensemble import RandomForestRegressor
 
 app = FastAPI(title="Trading-Grade Forecast Engine")
 
-FINNHUB_API_KEY = "PASTE_YOUR_KEY_HERE"
+FINNHUB_API_KEY = "d8sjampr01qh5rere5ogd8sjampr01qh5rere5p0"
 BASE_URL = "https://finnhub.io/api/v1"
 
 
